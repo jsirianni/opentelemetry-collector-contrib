@@ -17,7 +17,6 @@ package flatten // import "github.com/open-telemetry/opentelemetry-collector-con
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"go.uber.org/zap"
 
@@ -41,7 +40,7 @@ func NewConfig(operatorID string) *Config {
 // Config is the configuration of a flatten operator
 type Config struct {
 	helper.TransformerConfig `mapstructure:",squash" yaml:",inline"`
-	Field                    entry.BodyField `mapstructure:"field" json:"field" yaml:"field"`
+	Field                    entry.Field `mapstructure:"field" json:"field" yaml:"field"`
 }
 
 // Build will build a Flatten operator from the supplied configuration
@@ -49,10 +48,6 @@ func (c Config) Build(logger *zap.SugaredLogger) (operator.Operator, error) {
 	transformerOperator, err := c.TransformerConfig.Build(logger)
 	if err != nil {
 		return nil, err
-	}
-
-	if strings.Contains(c.Field.String(), "attributes") || strings.Contains(c.Field.String(), "resource") {
-		return nil, fmt.Errorf("flatten: field cannot be a resource or attribute")
 	}
 
 	return &Transformer{
@@ -64,7 +59,7 @@ func (c Config) Build(logger *zap.SugaredLogger) (operator.Operator, error) {
 // Transformer flattens an object in the body field
 type Transformer struct {
 	helper.TransformerOperator
-	Field entry.BodyField
+	Field entry.Field
 }
 
 // Process will process an entry with a flatten transformation.

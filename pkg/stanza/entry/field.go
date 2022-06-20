@@ -63,6 +63,57 @@ func (f *Field) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return err
 }
 
+func (f Field) Parent() Field {
+	switch x := f.FieldInterface.(type) {
+	case BodyField:
+		return Field{
+			FieldInterface: x.Parent(),
+		}
+	case AttributeField:
+		return Field{
+			FieldInterface: x.Parent(),
+		}
+	case ResourceField:
+		return Field{
+			FieldInterface: x.Parent(),
+		}
+	}
+	return f
+}
+
+func (f Field) Child(key string) Field {
+	switch x := f.FieldInterface.(type) {
+	case BodyField:
+		child := make([]string, len(x.Keys), len(x.Keys)+1)
+		copy(child, x.Keys)
+		child = append(child, key)
+		return Field{
+			FieldInterface: BodyField{
+				child,
+			},
+		}
+	case AttributeField:
+		child := make([]string, len(x.Keys), len(x.Keys)+1)
+		copy(child, x.Keys)
+		child = append(child, key)
+		return Field{
+			FieldInterface: AttributeField{
+				child,
+			},
+		}
+	case ResourceField:
+		child := make([]string, len(x.Keys), len(x.Keys)+1)
+		copy(child, x.Keys)
+		child = append(child, key)
+		return Field{
+			FieldInterface: ResourceField{
+				child,
+			},
+		}
+	}
+	return f
+}
+
 func NewField(s string) (Field, error) {
 	keys, err := fromJSONDot(s)
 	if err != nil {
