@@ -93,10 +93,10 @@ func converters[K any]() []ottl.Factory[K] {
 		NewUnixNanoFactory[K](),
 		NewUnixSecondsFactory[K](),
 		NewUUIDFactory[K](),
-		NewURLFactory[K](),
 		NewUserAgentFactory[K](),
 		NewAppendFactory[K](),
 		NewYearFactory[K](),
 		NewHexFactory[K](),
+		NewStringReplaceAllFactory[K](),
 	}
 }
