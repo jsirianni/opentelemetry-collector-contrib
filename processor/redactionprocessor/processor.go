@@ -334,7 +334,7 @@ func (s *redaction) processAttrs(_ context.Context, attributes pcommon.Map) {
 	// TODO: Use the context for recording metrics
 	var redactedKeys, maskedKeys, allowedKeys, ignoredKeys []string
 
-	if s.dbObfuscator != nil {
+	if s.dbObfuscator.HasObfuscators() {
 		s.dbObfuscator.DBSystem = db.GetDBSystem(attributes)
 	}
 

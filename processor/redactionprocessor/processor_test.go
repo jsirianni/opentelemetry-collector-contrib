@@ -2660,3 +2660,27 @@ func TestLogBodyMaskedKeyPathsExact(t *testing.T) {
 	assert.Contains(t, parts, "nested.card")
 	assert.Contains(t, parts, "cards.[0]")
 }
+
+func TestNoDBSanitizerLeavesDBSystemAttrsUntouched(t *testing.T) {
+	// DBSanitizer not configured -> HasObfuscators() == false.
+	cfg := &Config{AllowAllKeys: true}
+	proc, err := newRedaction(context.Background(), cfg, zaptest.NewLogger(t))
+	require.NoError(t, err)
+
+	logs := plog.NewLogs()
+	lr := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	attrs := lr.Attributes()
+	attrs.PutStr("db.system", "postgresql")
+	attrs.PutStr("db.statement", "SELECT * FROM users WHERE id = 42")
+
+	_, err = proc.processLogs(context.Background(), logs)
+	require.NoError(t, err)
+
+	got, ok := lr.Attributes().Get("db.statement")
+	require.True(t, ok)
+	assert.Equal(t, "SELECT * FROM users WHERE id = 42", got.Str(),
+		"DB obfuscation must not run when no DB sanitizer is configured")
+	sys, ok := lr.Attributes().Get("db.system")
+	require.True(t, ok)
+	assert.Equal(t, "postgresql", sys.Str())
+}
