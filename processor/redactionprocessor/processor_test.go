@@ -5,6 +5,7 @@ package redactionprocessor
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -2365,4 +2366,111 @@ func TestDBObfuscationErrorInAttribute(t *testing.T) {
 	val, ok := outSpan.Attributes().Get("db.statement")
 	require.True(t, ok)
 	assert.Equal(t, "SELECT * FROM users WHERE id = ?", val.Str())
+}
+
+// benchConfig returns the redaction configuration used by
+// BenchmarkRedactLogsBlockedValues. It mirrors a real-world deployment that
+// masks a broad set of PII via blocked_values while allowing all keys and
+// redacting non-string attribute types.
+func benchConfig() *Config {
+	return &Config{
+		AllowAllKeys:   true,
+		RedactAllTypes: true,
+		IgnoredKeys:    []string{"__bindplane_id__"},
+		BlockedValues: []string{
+			`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,31}(?:\s[A-Z0-9])*\b`,
+			`\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b`,
+			`\b(?:3[47][ -]?\d{4}[ -]?\d{6}[ -]?\d{3}|4\d{3}(?:[ -]?\d{4}){3}|5[1-5]\d{2}(?:[ -]?\d{4}){3}|6(?:011|5\d{2})(?:[ -]?\d{4}){3}|35(?:2[89]|[3-8]\d)(?:[ -]?\d{4}){3}|3(?:0[0-5]|[68]\d)(?:[ -]?\d){11}|62(?:[ -]?\d){14,17})\b`,
+			`\b(?:(?:19|20)?\d{2}[-/])?(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])(?:[-/](?:19|20)?\d{2})?\b`,
+			`\b[a-zA-Z0-9._/\+\-—|]+@[A-Za-z0-9\-—|]+\.[a-zA-Z|]{2,6}\b`,
+			`\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b`,
+			`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
+			`\b((\+|\b)[1l][\-\. ])?\(?\b[\dOlZSB]{3,5}([\-\. ]|\) ?)[\dOlZSB]{3}[\-\. ][\dOlZSB]{4}\b`,
+			`\+[1-9]\d{0,2}(?:[-.\s]?\(?\d+\)?(?:[-.\s]?\d+)*)\b`,
+			`\b\d{3}[- ]\d{2}[- ]\d{4}\b`,
+			`\b[A-Z][A-Za-z\s\.]+,\s{0,1}[A-Z]{2}\b`,
+			`\b\d+\s[A-z]+\s[A-z]+(\s[A-z]+)?\s*\d*\b`,
+			`\b\d{5}(?:[-\s]\d{4})?\b`,
+			`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`,
+		},
+	}
+}
+
+// makeBenchLogRecord populates a single log record with a realistic mix of
+// attributes and a nested body. Some values match one or more of the
+// blocked_values patterns (and are masked) while others match none, so the
+// serial blockRegexList loop in processStringValueForLogBody /
+// processStringValueForAttribute is exercised on both hit and miss paths,
+// including the recursive map/slice body traversal.
+func makeBenchLogRecord(le plog.LogRecord) {
+	le.SetTraceID([16]byte{1, 2, 3, 4})
+
+	// Attributes: ignored key, clean strings, PII strings, and non-string
+	// types (exercised because RedactAllTypes is true).
+	attrs := le.Attributes()
+	attrs.PutStr("__bindplane_id__", "01HZ8X9K2M3N4P5Q6R7S8T9V0W")
+	attrs.PutStr("service", "checkout-api")
+	attrs.PutStr("level", "info")
+	attrs.PutStr("user.email", "jane.doe@example.com")
+	attrs.PutStr("client.ip", "192.168.10.42")
+	attrs.PutStr("trace.uuid", "550e8400-e29b-41d4-a716-446655440000")
+	attrs.PutInt("status_code", 200)
+	attrs.PutBool("retryable", false)
+
+	// Body: nested map containing top-level fields, a nested map, and a slice.
+	le.Body().SetEmptyMap()
+	body := le.Body().Map()
+	body.PutStr("message", "user authenticated successfully")
+	body.PutStr("credit_card", "4111111111111111")
+	body.PutStr("ssn", "123-45-6789")
+	body.PutStr("source_ip", "10.0.0.1")
+	body.PutStr("mac", "00:1A:2B:3C:4D:5E")
+
+	nested := body.PutEmptyMap("nested")
+	nested.PutStr("contact_email", "support@example.org")
+	nested.PutStr("phone", "+1 415-555-0132")
+	nested.PutStr("ipv6", "2001:0db8:85a3:0000:0000:8a2e:0370:7334")
+	nested.PutStr("note", "no sensitive data here")
+
+	slice := body.PutEmptySlice("slice")
+	slice.AppendEmpty().SetStr("4111111111111111")
+	slice.AppendEmpty().SetStr("plain text element")
+	slice.AppendEmpty().SetStr("user2@example.com")
+}
+
+// buildBenchLogs builds a plog.Logs batch with a single resource/scope and n
+// log records, each populated by makeBenchLogRecord.
+func buildBenchLogs(n int) plog.Logs {
+	logs := plog.NewLogs()
+	rl := logs.ResourceLogs().AppendEmpty()
+	rl.Resource().Attributes().PutStr("service.name", "checkout")
+	ils := rl.ScopeLogs().AppendEmpty()
+	ils.Scope().SetName("bench-scope")
+	for i := 0; i < n; i++ {
+		makeBenchLogRecord(ils.LogRecords().AppendEmpty())
+	}
+	return logs
+}
+
+// BenchmarkRedactLogsBlockedValues measures the cost of running the redaction
+// processor over logs using a broad blocked_values regex set. The processor
+// (and thus all regex compilation) is created once; only processLogs is timed.
+// Each iteration processes a freshly built batch because redaction mutates
+// pdata in place. Sub-benchmarks vary the number of log records per batch so
+// the per-record cost of the serial blocked_values loop is visible at scale.
+func BenchmarkRedactLogsBlockedValues(b *testing.B) {
+	processor, err := newRedaction(b.Context(), benchConfig(), zaptest.NewLogger(b))
+	require.NoError(b, err)
+
+	for _, n := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				logs := buildBenchLogs(n)
+				b.StartTimer()
+				_, _ = processor.processLogs(b.Context(), logs)
+			}
+		})
+	}
 }
