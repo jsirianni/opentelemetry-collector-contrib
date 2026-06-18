@@ -2446,7 +2446,7 @@ func buildBenchLogs(n int) plog.Logs {
 	rl.Resource().Attributes().PutStr("service.name", "checkout")
 	ils := rl.ScopeLogs().AppendEmpty()
 	ils.Scope().SetName("bench-scope")
-	for i := 0; i < n; i++ {
+	for range n {
 		makeBenchLogRecord(ils.LogRecords().AppendEmpty())
 	}
 	return logs
@@ -2473,4 +2473,119 @@ func BenchmarkRedactLogsBlockedValues(b *testing.B) {
 			}
 		})
 	}
+}
+
+// benchKeyConfig returns a config that masks values whose KEY matches a
+// blocked_key_patterns entry. This drives the shouldMaskKey -> maskValue(...,
+// maskAllRegex) path (processor.go:368 for attributes, :209/:258 for the log
+// body), which is the path optimized by hoisting regexp.MustCompile(".*") to a
+// package-level var. allow_all_keys is true so matching keys are masked rather
+// than removed; no blocked_values are set so the only masking comes from key
+// matches.
+func benchKeyConfig() *Config {
+	return &Config{
+		AllowAllKeys:   true,
+		RedactAllTypes: true,
+		BlockedKeyPatterns: []string{
+			".*token.*",
+			".*secret.*",
+			".*password.*",
+			".*api_key.*",
+		},
+	}
+}
+
+// makeBenchKeyLogRecord populates a single log record with keys that match the
+// blocked_key_patterns (masked via the whole-value mask path) at every level:
+// attributes, the top-level body map, and a nested body map. Clean keys are
+// mixed in so shouldMaskKey is exercised on both hit and miss.
+func makeBenchKeyLogRecord(le plog.LogRecord) {
+	le.SetTraceID([16]byte{1, 2, 3, 4})
+
+	// Attributes: matching keys (masked via processor.go:368) plus clean keys
+	// and a non-string matching key (exercised because RedactAllTypes is true).
+	attrs := le.Attributes()
+	attrs.PutStr("service", "checkout-api")
+	attrs.PutStr("level", "info")
+	attrs.PutStr("auth.token", "eyJhbGciOiJIUzI1Ni.payload.signature")
+	attrs.PutStr("db.password", "hunter2-correct-horse")
+	attrs.PutStr("client.secret", "s3cr3t-value-here")
+	attrs.PutStr("service.api_key", "sk-live-0123456789abcdef")
+	attrs.PutInt("token_version", 3)
+
+	// Body top-level map: matching keys hit processLogBody (processor.go:209).
+	le.Body().SetEmptyMap()
+	body := le.Body().Map()
+	body.PutStr("message", "user authenticated successfully")
+	body.PutStr("access_token", "abc.def.ghi.jkl.mno")
+	body.PutStr("user_password", "another-secret-value")
+
+	// Nested map: matching keys hit redactLogBodyRecursive (processor.go:258).
+	nested := body.PutEmptyMap("nested")
+	nested.PutStr("note", "no sensitive data here")
+	nested.PutStr("refresh_token", "rt-9876543210fedcba")
+	nested.PutStr("client_secret", "nested-secret-shhh")
+	nested.PutStr("vendor_api_key", "vk-abcdef0123456789")
+}
+
+// buildBenchKeyLogs builds a plog.Logs batch with a single resource/scope and n
+// log records, each populated by makeBenchKeyLogRecord.
+func buildBenchKeyLogs(n int) plog.Logs {
+	logs := plog.NewLogs()
+	rl := logs.ResourceLogs().AppendEmpty()
+	rl.Resource().Attributes().PutStr("service.name", "checkout")
+	ils := rl.ScopeLogs().AppendEmpty()
+	ils.Scope().SetName("bench-scope")
+	for range n {
+		makeBenchKeyLogRecord(ils.LogRecords().AppendEmpty())
+	}
+	return logs
+}
+
+// BenchmarkRedactLogsBlockedKeys measures the cost of the whole-value mask path
+// (keys matching blocked_key_patterns). Unlike BenchmarkRedactLogsBlockedValues,
+// this benchmark actually exercises maskValue(..., maskAllRegex), so it reflects
+// the win from hoisting regexp.MustCompile(".*") out of the per-key hot path.
+// The processor is created once; only processLogs is timed, over a freshly built
+// batch each iteration (redaction mutates pdata in place).
+func BenchmarkRedactLogsBlockedKeys(b *testing.B) {
+	processor, err := newRedaction(b.Context(), benchKeyConfig(), zaptest.NewLogger(b))
+	require.NoError(b, err)
+
+	for _, n := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				logs := buildBenchKeyLogs(n)
+				b.StartTimer()
+				_, _ = processor.processLogs(b.Context(), logs)
+			}
+		})
+	}
+}
+
+func TestMaskKeyPreservesMultilineSemantics(t *testing.T) {
+	cfg := &Config{
+		AllowAllKeys:       true,
+		BlockedKeyPatterns: []string{".*secret.*"},
+	}
+	proc, err := newRedaction(context.Background(), cfg, zaptest.NewLogger(t))
+	require.NoError(t, err)
+
+	logs := plog.NewLogs()
+	lr := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	body := lr.Body()
+	body.SetEmptyMap()
+	// key matches blocked_key_patterns -> whole-value mask path (.* per line)
+	body.Map().PutStr("my_secret", "line1\nline2")
+
+	_, err = proc.processLogs(context.Background(), logs)
+	require.NoError(t, err)
+
+	got, ok := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).
+		Body().Map().Get("my_secret")
+	require.True(t, ok)
+	// .* does not cross newlines: each line masked, separator preserved.
+	assert.Equal(t, "****\n****", got.Str())
 }

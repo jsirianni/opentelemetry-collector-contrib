@@ -32,6 +32,10 @@ import (
 
 const attrValuesSeparator = ","
 
+// maskAllRegex matches an entire string value and is used to mask values whose key matched a
+// blocked_key_patterns entry. Compiled once; *regexp.Regexp is safe for concurrent use.
+var maskAllRegex = regexp.MustCompile(".*")
+
 type redaction struct {
 	// Attribute keys allowed in a span
 	allowList map[string]string
@@ -202,7 +206,7 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 			}
 			if s.shouldMaskKey(k) {
 				maskedKeys = append(maskedKeys, k)
-				v.SetStr(s.maskValue(v.Str(), regexp.MustCompile(".*")))
+				v.SetStr(s.maskValue(v.Str(), maskAllRegex))
 				return true
 			}
 			s.redactLogBodyRecursive(ctx, k, v, &redactedKeys, &maskedKeys, &allowedKeys, &ignoredKeys)
@@ -251,7 +255,7 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 			}
 			if s.shouldMaskKey(k) {
 				*maskedKeys = append(*maskedKeys, keyWithPath)
-				v.SetStr(s.maskValue(v.Str(), regexp.MustCompile(".*")))
+				v.SetStr(s.maskValue(v.Str(), maskAllRegex))
 				return true
 			}
 			s.redactLogBodyRecursive(ctx, keyWithPath, v, redactedKeys, maskedKeys, allowedKeys, ignoredKeys)
@@ -361,7 +365,7 @@ func (s *redaction) processAttrs(_ context.Context, attributes pcommon.Map) {
 		}
 		if s.shouldMaskKey(k) {
 			maskedKeys = append(maskedKeys, k)
-			maskedValue := s.maskValue(strVal, regexp.MustCompile(".*"))
+			maskedValue := s.maskValue(strVal, maskAllRegex)
 			value.SetStr(maskedValue)
 			continue
 		}
