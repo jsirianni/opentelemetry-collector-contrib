@@ -16,6 +16,7 @@ import (
 	"hash"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/collector/config/configopaque"
@@ -218,7 +219,7 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 		}
 	case pcommon.ValueTypeSlice:
 		for i := 0; i < body.Slice().Len(); i++ {
-			s.redactLogBodyRecursive(ctx, fmt.Sprintf("[%d]", i), body.Slice().At(i), &redactedKeys, &maskedKeys, &allowedKeys, &ignoredKeys)
+			s.redactLogBodyRecursive(ctx, "["+strconv.Itoa(i)+"]", body.Slice().At(i), &redactedKeys, &maskedKeys, &allowedKeys, &ignoredKeys)
 		}
 	default:
 		strVal := body.AsString()
@@ -244,7 +245,7 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 	case pcommon.ValueTypeMap:
 		var redactedCurrentValueKeys []string
 		value.Map().Range(func(k string, v pcommon.Value) bool {
-			keyWithPath := fmt.Sprintf("%s.%s", key, k)
+			keyWithPath := key + "." + k
 			if s.shouldIgnoreKey(k) {
 				*ignoredKeys = append(*ignoredKeys, keyWithPath)
 				return true
@@ -263,12 +264,12 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 		})
 		for _, k := range redactedCurrentValueKeys {
 			value.Map().Remove(k)
-			keyWithPath := fmt.Sprintf("%s.%s", key, k)
+			keyWithPath := key + "." + k
 			*redactedKeys = append(*redactedKeys, keyWithPath)
 		}
 	case pcommon.ValueTypeSlice:
 		for i := 0; i < value.Slice().Len(); i++ {
-			keyWithPath := fmt.Sprintf("%s.[%d]", key, i)
+			keyWithPath := key + ".[" + strconv.Itoa(i) + "]"
 			s.redactLogBodyRecursive(ctx, keyWithPath, value.Slice().At(i), redactedKeys, maskedKeys, allowedKeys, ignoredKeys)
 		}
 	default:

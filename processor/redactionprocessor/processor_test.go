@@ -2628,3 +2628,35 @@ func TestBlockedValuesDeterministicOrder(t *testing.T) {
 		require.Equalf(t, want, got, "non-deterministic masking on iteration %d", i)
 	}
 }
+
+func TestLogBodyMaskedKeyPathsExact(t *testing.T) {
+	cfg := &Config{
+		AllowAllKeys:   true,
+		RedactAllTypes: true,
+		Summary:        "debug",
+		BlockedValues:  []string{`4[0-9]{12}(?:[0-9]{3})?`}, // matches the card numbers below
+	}
+	proc, err := newRedaction(context.Background(), cfg, zaptest.NewLogger(t))
+	require.NoError(t, err)
+
+	logs := plog.NewLogs()
+	lr := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	lr.Body().SetEmptyMap()
+	body := lr.Body().Map()
+	nested := body.PutEmptyMap("nested")
+	nested.PutStr("card", "4111111111111111") // -> path "nested.card"
+	slice := body.PutEmptySlice("cards")
+	slice.AppendEmpty().SetStr("4111111111111111") // -> path "cards.[0]"
+
+	_, err = proc.processLogs(context.Background(), logs)
+	require.NoError(t, err)
+
+	attrs := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Attributes()
+	maskedKeys, ok := attrs.Get("redaction.body.masked.keys")
+	require.True(t, ok)
+	// addMetaAttrs sorts the keys; assert both expected dotted paths are present
+	// and exactly formatted.
+	parts := strings.Split(maskedKeys.Str(), ",")
+	assert.Contains(t, parts, "nested.card")
+	assert.Contains(t, parts, "cards.[0]")
+}
