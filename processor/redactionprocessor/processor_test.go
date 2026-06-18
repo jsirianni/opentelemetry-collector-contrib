@@ -2589,3 +2589,42 @@ func TestMaskKeyPreservesMultilineSemantics(t *testing.T) {
 	// .* does not cross newlines: each line masked, separator preserved.
 	assert.Equal(t, "****\n****", got.Str())
 }
+
+func TestBlockedValuesDeterministicOrder(t *testing.T) {
+	// Two OVERLAPPING patterns that both match the same value; with map
+	// iteration the masked result depends on random order. With ordered
+	// slices the result is stable across runs.
+	cfg := &Config{
+		AllowAllKeys:   true,
+		RedactAllTypes: true,
+		BlockedValues: []string{
+			`\d{3}-\d{2}-\d{4}`, // SSN-like
+			`\d{2}-\d{4}`,        // overlaps the tail of the SSN
+		},
+	}
+
+	build := func() plog.Logs {
+		logs := plog.NewLogs()
+		lr := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+		lr.Body().SetStr("id 123-45-6789 end")
+		return logs
+	}
+
+	proc, err := newRedaction(context.Background(), cfg, zaptest.NewLogger(t))
+	require.NoError(t, err)
+
+	// First result is the reference.
+	first := build()
+	_, err = proc.processLogs(context.Background(), first)
+	require.NoError(t, err)
+	want := first.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Str()
+
+	// Re-running the SAME input many times must always produce the SAME output.
+	for i := 0; i < 200; i++ {
+		logs := build()
+		_, err = proc.processLogs(context.Background(), logs)
+		require.NoError(t, err)
+		got := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Str()
+		require.Equalf(t, want, got, "non-deterministic masking on iteration %d", i)
+	}
+}
