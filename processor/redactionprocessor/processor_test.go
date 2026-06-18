@@ -2684,3 +2684,41 @@ func TestNoDBSanitizerLeavesDBSystemAttrsUntouched(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "postgresql", sys.Str())
 }
+
+func TestSummaryDisabledStillRedactsButEmitsNoMeta(t *testing.T) {
+	cfg := &Config{
+		AllowedKeys:   []string{"keep"},
+		BlockedValues: []string{`4[0-9]{12}(?:[0-9]{3})?`},
+		Summary:       "", // disabled (default)
+	}
+	proc, err := newRedaction(context.Background(), cfg, zaptest.NewLogger(t))
+	require.NoError(t, err)
+
+	logs := plog.NewLogs()
+	lr := logs.ResourceLogs().AppendEmpty().ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
+	a := lr.Attributes()
+	a.PutStr("keep", "placeholder 4111111111111111") // allowed key, value masked
+	a.PutStr("drop", "anything")                     // not allowed -> redacted/removed
+
+	_, err = proc.processLogs(context.Background(), logs)
+	require.NoError(t, err)
+
+	out := lr.Attributes()
+	// functional redaction still happens
+	kept, ok := out.Get("keep")
+	require.True(t, ok)
+	assert.Equal(t, "placeholder ****", kept.Str())
+	_, ok = out.Get("drop")
+	assert.False(t, ok, "non-allowed key must still be removed when summary disabled")
+
+	// but NO diagnostic meta attributes are emitted
+	for _, metaKey := range []string{
+		"redaction.redacted.keys", "redaction.redacted.count",
+		"redaction.masked.keys", "redaction.masked.count",
+		"redaction.allowed.keys", "redaction.allowed.count",
+		"redaction.ignored.count",
+	} {
+		_, ok := out.Get(metaKey)
+		assert.Falsef(t, ok, "unexpected meta attribute %q when summary disabled", metaKey)
+	}
+}

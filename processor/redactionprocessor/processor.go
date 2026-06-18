@@ -60,6 +60,10 @@ type redaction struct {
 	urlSanitizer *url.URLSanitizer
 	// Database obfuscator
 	dbObfuscator *db.Obfuscator
+	// summaryEnabled is true when diagnostic summary attributes are emitted
+	// (config.Summary is "info" or "debug"). When false, masked/allowed/ignored
+	// key bookkeeping is skipped.
+	summaryEnabled bool
 }
 
 // newRedaction creates a new instance of the redaction processor
@@ -109,6 +113,7 @@ func newRedaction(ctx context.Context, config *Config, logger *zap.Logger) (*red
 		logger:             logger,
 		urlSanitizer:       urlSanitizer,
 		dbObfuscator:       dbObfuscator,
+		summaryEnabled:     config.Summary == info || config.Summary == debug,
 	}, nil
 }
 
@@ -198,7 +203,9 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 		var redactedBodyKeys []string
 		body.Map().Range(func(k string, v pcommon.Value) bool {
 			if s.shouldIgnoreKey(k) {
-				ignoredKeys = append(ignoredKeys, k)
+				if s.summaryEnabled {
+					ignoredKeys = append(ignoredKeys, k)
+				}
 				return true
 			}
 			if s.shouldRedactKey(k) {
@@ -206,7 +213,9 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 				return true
 			}
 			if s.shouldMaskKey(k) {
-				maskedKeys = append(maskedKeys, k)
+				if s.summaryEnabled {
+					maskedKeys = append(maskedKeys, k)
+				}
 				v.SetStr(s.maskValue(v.Str(), maskAllRegex))
 				return true
 			}
@@ -215,7 +224,9 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 		})
 		for _, k := range redactedBodyKeys {
 			body.Map().Remove(k)
-			redactedKeys = append(redactedKeys, k)
+			if s.summaryEnabled {
+				redactedKeys = append(redactedKeys, k)
+			}
 		}
 	case pcommon.ValueTypeSlice:
 		for i := 0; i < body.Slice().Len(); i++ {
@@ -224,12 +235,16 @@ func (s *redaction) processLogBody(ctx context.Context, body pcommon.Value, attr
 	default:
 		strVal := body.AsString()
 		if s.shouldAllowValue(strVal) {
-			allowedKeys = append(allowedKeys, "body")
+			if s.summaryEnabled {
+				allowedKeys = append(allowedKeys, "body")
+			}
 			return
 		}
 		processedValue := s.processStringValueForLogBody(strVal)
 		if strVal != processedValue {
-			maskedKeys = append(maskedKeys, "body")
+			if s.summaryEnabled {
+				maskedKeys = append(maskedKeys, "body")
+			}
 			body.SetStr(processedValue)
 		}
 	}
@@ -247,7 +262,9 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 		value.Map().Range(func(k string, v pcommon.Value) bool {
 			keyWithPath := key + "." + k
 			if s.shouldIgnoreKey(k) {
-				*ignoredKeys = append(*ignoredKeys, keyWithPath)
+				if s.summaryEnabled {
+					*ignoredKeys = append(*ignoredKeys, keyWithPath)
+				}
 				return true
 			}
 			if s.shouldRedactKey(k) {
@@ -255,7 +272,9 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 				return true
 			}
 			if s.shouldMaskKey(k) {
-				*maskedKeys = append(*maskedKeys, keyWithPath)
+				if s.summaryEnabled {
+					*maskedKeys = append(*maskedKeys, keyWithPath)
+				}
 				v.SetStr(s.maskValue(v.Str(), maskAllRegex))
 				return true
 			}
@@ -264,8 +283,10 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 		})
 		for _, k := range redactedCurrentValueKeys {
 			value.Map().Remove(k)
-			keyWithPath := key + "." + k
-			*redactedKeys = append(*redactedKeys, keyWithPath)
+			if s.summaryEnabled {
+				keyWithPath := key + "." + k
+				*redactedKeys = append(*redactedKeys, keyWithPath)
+			}
 		}
 	case pcommon.ValueTypeSlice:
 		for i := 0; i < value.Slice().Len(); i++ {
@@ -275,12 +296,16 @@ func (s *redaction) redactLogBodyRecursive(ctx context.Context, key string, valu
 	default:
 		strVal := value.AsString()
 		if s.shouldAllowValue(strVal) {
-			*allowedKeys = append(*allowedKeys, key)
+			if s.summaryEnabled {
+				*allowedKeys = append(*allowedKeys, key)
+			}
 			return
 		}
 		processedValue := s.processStringValueForLogBody(strVal)
 		if strVal != processedValue {
-			*maskedKeys = append(*maskedKeys, key)
+			if s.summaryEnabled {
+				*maskedKeys = append(*maskedKeys, key)
+			}
 			value.SetStr(processedValue)
 		}
 	}
@@ -348,7 +373,9 @@ func (s *redaction) processAttrs(_ context.Context, attributes pcommon.Map) {
 	// - Don't mask any values if the whole attribute is slated for deletion
 	for k, value := range attributes.All() {
 		if s.shouldIgnoreKey(k) {
-			ignoredKeys = append(ignoredKeys, k)
+			if s.summaryEnabled {
+				ignoredKeys = append(ignoredKeys, k)
+			}
 			continue
 		}
 		if s.shouldRedactKey(k) {
@@ -361,18 +388,24 @@ func (s *redaction) processAttrs(_ context.Context, attributes pcommon.Map) {
 		}
 
 		if s.shouldAllowValue(strVal) {
-			allowedKeys = append(allowedKeys, k)
+			if s.summaryEnabled {
+				allowedKeys = append(allowedKeys, k)
+			}
 			continue
 		}
 		if s.shouldMaskKey(k) {
-			maskedKeys = append(maskedKeys, k)
+			if s.summaryEnabled {
+				maskedKeys = append(maskedKeys, k)
+			}
 			maskedValue := s.maskValue(strVal, maskAllRegex)
 			value.SetStr(maskedValue)
 			continue
 		}
 		processedString := s.processStringValueForAttribute(strVal, k)
 		if processedString != strVal {
-			maskedKeys = append(maskedKeys, k)
+			if s.summaryEnabled {
+				maskedKeys = append(maskedKeys, k)
+			}
 			value.SetStr(processedString)
 		}
 	}
