@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -127,12 +128,105 @@ func (s *redaction) processTraces(ctx context.Context, batch ptrace.Traces) (ptr
 	return batch, nil
 }
 
+// numLogWorkers is the fixed number of workers used when processing logs
+// concurrently. It is kept as a constant so a future configuration option can
+// size the pool without reworking the fan-out below. The effective worker count
+// is min(numLogWorkers, number of log records in the batch).
+const numLogWorkers = 4
+
 func (s *redaction) processLogs(ctx context.Context, logs plog.Logs) (plog.Logs, error) {
+	if s.canProcessLogsConcurrently() {
+		s.processLogsConcurrent(ctx, logs)
+		return logs, nil
+	}
 	for i := 0; i < logs.ResourceLogs().Len(); i++ {
 		rl := logs.ResourceLogs().At(i)
 		s.processResourceLog(ctx, rl)
 	}
 	return logs, nil
+}
+
+// canProcessLogsConcurrently reports whether the per-record log processing path
+// is free of shared-mutable processor state and of dependencies whose
+// concurrency-safety is unverified. This holds only when both the URL sanitizer
+// and the DB obfuscator are disabled.
+//
+// The single shared-mutable write on the log path is the assignment to
+// s.dbObfuscator.DBSystem in processAttrs, which is guarded by
+// s.dbObfuscator.HasObfuscators(); when the DB obfuscator is disabled that write
+// never executes. The URL sanitizer delegates to a third-party classifier whose
+// concurrency-safety is unverified, so it is excluded as well. With both
+// disabled, each worker mutates only its own log record's attributes and body
+// (disjoint memory) and reads only immutable shared state (compiled regexes,
+// allow/ignore maps, config).
+//
+// Intra-batch concurrency is safe because the processor declares
+// MutatesData: true (see factory.go), giving it exclusive ownership of the batch.
+func (s *redaction) canProcessLogsConcurrently() bool {
+	return s.urlSanitizer == nil && !s.dbObfuscator.HasObfuscators()
+}
+
+// processLogsConcurrent processes log records across up to numLogWorkers
+// goroutines. Resource- and scope-level attributes are shared by the records
+// beneath them, so they are processed in this sequential pre-pass; only the
+// per-record work is fanned out.
+//
+// PRECONDITION: canProcessLogsConcurrently() must be true.
+func (s *redaction) processLogsConcurrent(ctx context.Context, logs plog.Logs) {
+	var records []plog.LogRecord
+	resLogs := logs.ResourceLogs()
+	for i := 0; i < resLogs.Len(); i++ {
+		rl := resLogs.At(i)
+		s.processAttrs(ctx, rl.Resource().Attributes())
+		scopeLogs := rl.ScopeLogs()
+		for j := 0; j < scopeLogs.Len(); j++ {
+			sl := scopeLogs.At(j)
+			s.processAttrs(ctx, sl.Scope().Attributes())
+			lrs := sl.LogRecords()
+			for k := 0; k < lrs.Len(); k++ {
+				records = append(records, lrs.At(k))
+			}
+		}
+	}
+
+	n := len(records)
+	if n == 0 {
+		return
+	}
+
+	// Never spawn more workers than there are records.
+	workers := min(numLogWorkers, n)
+	if workers == 1 {
+		// A single record (or single-worker cap) does not benefit from a
+		// goroutine, so process it inline.
+		s.processLogRecords(ctx, records)
+		return
+	}
+
+	// Split the records into contiguous chunks, one per worker. The ceiling
+	// division ensures every record is covered; the final chunk absorbs any
+	// remainder.
+	chunk := (n + workers - 1) / workers
+	var wg sync.WaitGroup
+	for start := 0; start < n; start += chunk {
+		end := min(start+chunk, n)
+		wg.Add(1)
+		go func(batch []plog.LogRecord) {
+			defer wg.Done()
+			s.processLogRecords(ctx, batch)
+		}(records[start:end])
+	}
+	wg.Wait()
+}
+
+// processLogRecords applies attribute and body redaction to each log record. It
+// is safe to call from a worker goroutine only when canProcessLogsConcurrently()
+// holds, because it mutates only each record's own attributes and body.
+func (s *redaction) processLogRecords(ctx context.Context, records []plog.LogRecord) {
+	for _, lr := range records {
+		s.processAttrs(ctx, lr.Attributes())
+		s.processLogBody(ctx, lr.Body(), lr.Attributes())
+	}
 }
 
 func (s *redaction) processMetrics(ctx context.Context, metrics pmetric.Metrics) (pmetric.Metrics, error) {

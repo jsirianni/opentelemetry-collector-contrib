@@ -2368,31 +2368,37 @@ func TestDBObfuscationErrorInAttribute(t *testing.T) {
 	assert.Equal(t, "SELECT * FROM users WHERE id = ?", val.Str())
 }
 
+// benchBlockedValues is the broad set of PII blocked_values patterns used by
+// BenchmarkRedactLogsBlockedValues. It mirrors a real-world deployment. The
+// benchmark sweeps prefixes of this slice (1..len) to show how per-record cost
+// scales as blocked_values patterns are added.
+var benchBlockedValues = []string{
+	`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,31}(?:\s[A-Z0-9])*\b`,
+	`\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b`,
+	`\b(?:3[47][ -]?\d{4}[ -]?\d{6}[ -]?\d{3}|4\d{3}(?:[ -]?\d{4}){3}|5[1-5]\d{2}(?:[ -]?\d{4}){3}|6(?:011|5\d{2})(?:[ -]?\d{4}){3}|35(?:2[89]|[3-8]\d)(?:[ -]?\d{4}){3}|3(?:0[0-5]|[68]\d)(?:[ -]?\d){11}|62(?:[ -]?\d){14,17})\b`,
+	`\b(?:(?:19|20)?\d{2}[-/])?(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])(?:[-/](?:19|20)?\d{2})?\b`,
+	`\b[a-zA-Z0-9._/\+\-|]+@[A-Za-z0-9\-|]+\.[a-zA-Z|]{2,6}\b`,
+	`\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b`,
+	`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
+	`\b((\+|\b)[1l][\-\. ])?\(?\b[\dOlZSB]{3,5}([\-\. ]|\) ?)[\dOlZSB]{3}[\-\. ][\dOlZSB]{4}\b`,
+	`\+[1-9]\d{0,2}(?:[-.\s]?\(?\d+\)?(?:[-.\s]?\d+)*)\b`,
+	`\b\d{3}[- ]\d{2}[- ]\d{4}\b`,
+	`\b[A-Z][A-Za-z\s\.]+,\s{0,1}[A-Z]{2}\b`,
+	`\b\d+\s[A-z]+\s[A-z]+(\s[A-z]+)?\s*\d*\b`,
+	`\b\d{5}(?:[-\s]\d{4})?\b`,
+	`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`,
+}
+
 // benchConfig returns the redaction configuration used by
-// BenchmarkRedactLogsBlockedValues. It mirrors a real-world deployment that
-// masks a broad set of PII via blocked_values while allowing all keys and
-// redacting non-string attribute types.
-func benchConfig() *Config {
+// BenchmarkRedactLogsBlockedValues. It allows all keys and redacts non-string
+// attribute types, masking PII via the first numPatterns entries of
+// benchBlockedValues.
+func benchConfig(numPatterns int) *Config {
 	return &Config{
 		AllowAllKeys:   true,
 		RedactAllTypes: true,
 		IgnoredKeys:    []string{"__bindplane_id__"},
-		BlockedValues: []string{
-			`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,31}(?:\s[A-Z0-9])*\b`,
-			`\b([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b`,
-			`\b(?:3[47][ -]?\d{4}[ -]?\d{6}[ -]?\d{3}|4\d{3}(?:[ -]?\d{4}){3}|5[1-5]\d{2}(?:[ -]?\d{4}){3}|6(?:011|5\d{2})(?:[ -]?\d{4}){3}|35(?:2[89]|[3-8]\d)(?:[ -]?\d{4}){3}|3(?:0[0-5]|[68]\d)(?:[ -]?\d){11}|62(?:[ -]?\d){14,17})\b`,
-			`\b(?:(?:19|20)?\d{2}[-/])?(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])(?:[-/](?:19|20)?\d{2})?\b`,
-			`\b[a-zA-Z0-9._/\+\-—|]+@[A-Za-z0-9\-—|]+\.[a-zA-Z|]{2,6}\b`,
-			`\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b`,
-			`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
-			`\b((\+|\b)[1l][\-\. ])?\(?\b[\dOlZSB]{3,5}([\-\. ]|\) ?)[\dOlZSB]{3}[\-\. ][\dOlZSB]{4}\b`,
-			`\+[1-9]\d{0,2}(?:[-.\s]?\(?\d+\)?(?:[-.\s]?\d+)*)\b`,
-			`\b\d{3}[- ]\d{2}[- ]\d{4}\b`,
-			`\b[A-Z][A-Za-z\s\.]+,\s{0,1}[A-Z]{2}\b`,
-			`\b\d+\s[A-z]+\s[A-z]+(\s[A-z]+)?\s*\d*\b`,
-			`\b\d{5}(?:[-\s]\d{4})?\b`,
-			`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`,
-		},
+		BlockedValues:  benchBlockedValues[:numPatterns],
 	}
 }
 
@@ -2454,20 +2460,91 @@ func buildBenchLogs(n int) plog.Logs {
 
 // BenchmarkRedactLogsBlockedValues measures the cost of running the redaction
 // processor over logs using a broad blocked_values regex set. The processor
-// (and thus all regex compilation) is created once; only processLogs is timed.
-// Each iteration processes a freshly built batch because redaction mutates
-// pdata in place. Sub-benchmarks vary the number of log records per batch so
-// the per-record cost of the serial blocked_values loop is visible at scale.
+// (and thus all regex compilation) is created once per sub-benchmark; only
+// processLogs is timed. Each iteration processes a freshly built batch because
+// redaction mutates pdata in place. The batch size is fixed at 1,000 records;
+// sub-benchmarks sweep the number of blocked_values patterns from 1 to all of
+// them so the marginal cost of each additional pattern in the serial
+// blocked_values loop is visible.
 func BenchmarkRedactLogsBlockedValues(b *testing.B) {
-	processor, err := newRedaction(b.Context(), benchConfig(), zaptest.NewLogger(b))
-	require.NoError(b, err)
+	const records = 1000
 
-	for _, n := range []int{1, 10, 100} {
-		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
+	for i := range len(benchBlockedValues) {
+		numPatterns := i + 1
+		processor, err := newRedaction(b.Context(), benchConfig(numPatterns), zaptest.NewLogger(b))
+		require.NoError(b, err)
+
+		b.Run(fmt.Sprintf("patterns=%d", numPatterns), func(b *testing.B) {
 			b.ReportAllocs()
 			for b.Loop() {
 				b.StopTimer()
-				logs := buildBenchLogs(n)
+				logs := buildBenchLogs(records)
+				b.StartTimer()
+				_, _ = processor.processLogs(b.Context(), logs)
+			}
+		})
+	}
+}
+
+// benchBlockedValuesOptimized holds individually optimized rewrites of
+// benchBlockedValues, in the same order. The patterns are NOT combined; each
+// is rewritten to do less backtracking work while matching exactly the same
+// input (verified output-equivalent against benchBlockedValues). The
+// optimizations are all semantics-preserving under RE2:
+//   - capturing groups -> non-capturing ((...) -> (?:...)) so the bounded
+//     backtracker (regexp/backtrack.go) skips capture-slot bookkeeping and
+//     compiles to a smaller program (MAC, PhoneUS, Street).
+//   - redundant single-branch group removed (PhoneIntl).
+//   - \s{0,1} -> \s? and a redundant in-class escape dropped (CityState).
+//
+// Patterns that were already capture-free and minimal (IBAN, CreditCard, Date,
+// Email, IPv4, IPv6, SSN, Zip, UUID) are unchanged; RE2 offers no
+// semantics-preserving rewrite for them without altering what they match.
+var benchBlockedValuesOptimized = []string{
+	`\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,31}(?:\s[A-Z0-9])*\b`,
+	`\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b`,
+	`\b(?:3[47][ -]?\d{4}[ -]?\d{6}[ -]?\d{3}|4\d{3}(?:[ -]?\d{4}){3}|5[1-5]\d{2}(?:[ -]?\d{4}){3}|6(?:011|5\d{2})(?:[ -]?\d{4}){3}|35(?:2[89]|[3-8]\d)(?:[ -]?\d{4}){3}|3(?:0[0-5]|[68]\d)(?:[ -]?\d){11}|62(?:[ -]?\d){14,17})\b`,
+	`\b(?:(?:19|20)?\d{2}[-/])?(?:0?[1-9]|1[0-2])[-/](?:0?[1-9]|[12]\d|3[01])(?:[-/](?:19|20)?\d{2})?\b`,
+	`\b[a-zA-Z0-9._/\+\-|]+@[A-Za-z0-9\-|]+\.[a-zA-Z|]{2,6}\b`,
+	`\b(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\b`,
+	`\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b`,
+	`\b(?:(?:\+|\b)[1l][\-\. ])?\(?\b[\dOlZSB]{3,5}(?:[\-\. ]|\) ?)[\dOlZSB]{3}[\-\. ][\dOlZSB]{4}\b`,
+	`\+[1-9]\d{0,2}[-.\s]?\(?\d+\)?(?:[-.\s]?\d+)*\b`,
+	`\b\d{3}[- ]\d{2}[- ]\d{4}\b`,
+	`\b[A-Z][A-Za-z\s.]+,\s?[A-Z]{2}\b`,
+	`\b\d+\s[A-z]+\s[A-z]+(?:\s[A-z]+)?\s*\d*\b`,
+	`\b\d{5}(?:[-\s]\d{4})?\b`,
+	`\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}\b`,
+}
+
+// benchConfigOptimized mirrors benchConfig but uses benchBlockedValuesOptimized.
+func benchConfigOptimized(numPatterns int) *Config {
+	return &Config{
+		AllowAllKeys:   true,
+		RedactAllTypes: true,
+		IgnoredKeys:    []string{"__bindplane_id__"},
+		BlockedValues:  benchBlockedValuesOptimized[:numPatterns],
+	}
+}
+
+// BenchmarkRedactLogsBlockedValuesOptimized is identical to
+// BenchmarkRedactLogsBlockedValues (same 1,000-record batch, same 1..N pattern
+// sweep) but uses the individually optimized patterns from
+// benchBlockedValuesOptimized. Comparing the two with benchstat shows the
+// per-pattern win from the regex rewrites alone (patterns are not combined).
+func BenchmarkRedactLogsBlockedValuesOptimized(b *testing.B) {
+	const records = 1000
+
+	for i := range len(benchBlockedValuesOptimized) {
+		numPatterns := i + 1
+		processor, err := newRedaction(b.Context(), benchConfigOptimized(numPatterns), zaptest.NewLogger(b))
+		require.NoError(b, err)
+
+		b.Run(fmt.Sprintf("patterns=%d", numPatterns), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				b.StopTimer()
+				logs := buildBenchLogs(records)
 				b.StartTimer()
 				_, _ = processor.processLogs(b.Context(), logs)
 			}
@@ -2599,7 +2676,7 @@ func TestBlockedValuesDeterministicOrder(t *testing.T) {
 		RedactAllTypes: true,
 		BlockedValues: []string{
 			`\d{3}-\d{2}-\d{4}`, // SSN-like
-			`\d{2}-\d{4}`,        // overlaps the tail of the SSN
+			`\d{2}-\d{4}`,       // overlaps the tail of the SSN
 		},
 	}
 
@@ -2721,4 +2798,124 @@ func TestSummaryDisabledStillRedactsButEmitsNoMeta(t *testing.T) {
 		_, ok := out.Get(metaKey)
 		assert.Falsef(t, ok, "unexpected meta attribute %q when summary disabled", metaKey)
 	}
+}
+
+// buildMultiResourceBenchLogs builds a batch spread across multiple resources
+// and scopes so both the concurrent pre-pass (resource/scope attributes) and the
+// record fan-out are exercised. Total records = resources * scopes * recordsPerScope.
+func buildMultiResourceBenchLogs(resources, scopes, recordsPerScope int) plog.Logs {
+	logs := plog.NewLogs()
+	for range resources {
+		rl := logs.ResourceLogs().AppendEmpty()
+		rl.Resource().Attributes().PutStr("service.name", "checkout")
+		rl.Resource().Attributes().PutStr("host.ip", "10.0.0.1")
+		for range scopes {
+			ils := rl.ScopeLogs().AppendEmpty()
+			ils.Scope().SetName("bench-scope")
+			for range recordsPerScope {
+				makeBenchLogRecord(ils.LogRecords().AppendEmpty())
+			}
+		}
+	}
+	return logs
+}
+
+// TestProcessLogsConcurrentMatchesSequential proves that the concurrent log path
+// produces output byte-for-byte identical to the original sequential path. Both
+// inputs come from the deterministic buildBenchLogs, so any difference is
+// attributable to the processing path alone. Record counts cover the empty case,
+// the single-record inline case, the n<numLogWorkers cap, exactly numLogWorkers,
+// a remainder not divisible by numLogWorkers, and a large fan-out.
+func TestProcessLogsConcurrentMatchesSequential(t *testing.T) {
+	ctx := t.Context()
+	marshaler := &plog.JSONMarshaler{}
+
+	for _, sc := range []struct {
+		name    string
+		summary string
+	}{
+		{"summary_disabled", ""},
+		{"summary_debug", debug},
+	} {
+		t.Run(sc.name, func(t *testing.T) {
+			cfg := benchConfig(len(benchBlockedValues))
+			cfg.Summary = sc.summary
+			proc, err := newRedaction(ctx, cfg, zaptest.NewLogger(t))
+			require.NoError(t, err)
+			// Guard: this config must actually select the concurrent path.
+			require.True(t, proc.canProcessLogsConcurrently())
+
+			for _, n := range []int{0, 1, 2, 3, 4, 5, 7, 16, 1000} {
+				t.Run(fmt.Sprintf("records=%d", n), func(t *testing.T) {
+					seqLogs := buildBenchLogs(n)
+					conLogs := buildBenchLogs(n)
+
+					// Reference: the sequential path.
+					for i := 0; i < seqLogs.ResourceLogs().Len(); i++ {
+						proc.processResourceLog(ctx, seqLogs.ResourceLogs().At(i))
+					}
+					// Path under test.
+					proc.processLogsConcurrent(ctx, conLogs)
+
+					seqJSON, err := marshaler.MarshalLogs(seqLogs)
+					require.NoError(t, err)
+					conJSON, err := marshaler.MarshalLogs(conLogs)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(seqJSON), string(conJSON))
+				})
+			}
+		})
+	}
+}
+
+// TestCanProcessLogsConcurrently documents the gate: the concurrent path is used
+// only when neither the URL sanitizer nor the DB obfuscator is configured.
+func TestCanProcessLogsConcurrently(t *testing.T) {
+	ctx := t.Context()
+	logger := zaptest.NewLogger(t)
+
+	t.Run("blocked_values_only", func(t *testing.T) {
+		proc, err := newRedaction(ctx, benchConfig(1), logger)
+		require.NoError(t, err)
+		assert.True(t, proc.canProcessLogsConcurrently())
+	})
+
+	t.Run("url_sanitizer_disables_concurrency", func(t *testing.T) {
+		cfg := benchConfig(1)
+		cfg.URLSanitization = url.URLSanitizationConfig{Enabled: true}
+		proc, err := newRedaction(ctx, cfg, logger)
+		require.NoError(t, err)
+		require.NotNil(t, proc.urlSanitizer)
+		assert.False(t, proc.canProcessLogsConcurrently())
+	})
+
+	t.Run("db_obfuscator_disables_concurrency", func(t *testing.T) {
+		cfg := benchConfig(1)
+		cfg.DBSanitizer.SQLConfig = db.SQLConfig{Enabled: true}
+		proc, err := newRedaction(ctx, cfg, logger)
+		require.NoError(t, err)
+		require.True(t, proc.dbObfuscator.HasObfuscators())
+		assert.False(t, proc.canProcessLogsConcurrently())
+	})
+}
+
+// TestProcessLogsConcurrentRace drives the concurrent path on a batch spread
+// across multiple resources and scopes with values that trigger masking. Under
+// -race (the default for `make test`) it verifies that workers operating on
+// distinct records do not race on shared state.
+func TestProcessLogsConcurrentRace(t *testing.T) {
+	ctx := t.Context()
+	proc, err := newRedaction(ctx, benchConfig(len(benchBlockedValues)), zaptest.NewLogger(t))
+	require.NoError(t, err)
+	require.True(t, proc.canProcessLogsConcurrently())
+
+	logs := buildMultiResourceBenchLogs(8, 2, 250) // 4,000 records across 16 scopes
+	_, err = proc.processLogs(ctx, logs)
+	require.NoError(t, err)
+
+	// Spot-check that masking actually ran, so the race test exercises maskValue.
+	body := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0).Body().Map()
+	cc, ok := body.Get("credit_card")
+	require.True(t, ok)
+	assert.NotEqual(t, "4111111111111111", cc.Str(), "credit_card should have been masked")
 }
